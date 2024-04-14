@@ -1,117 +1,158 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import random
 import math
 
 # Configuration for the neural network
+EPISODES = 2500
 LEARNING_RATE = 0.00025
+MEM_SIZE = 50000
+REPLAY_START_SIZE = 10000
+BATCH_SIZE = 32
+GAMMA = 0.99
+EPS_START = 0.1
+EPS_END = 0.0001
+EPS_DECAY = 4 * MEM_SIZE
+MEM_RETAIN = 0.1      
+NETWORK_UPDATE_ITERS = 5000 
+
 FC1_DIMS = 128
 FC2_DIMS = 128
-MEM_SIZE = 50000
-EPS_START = 1.0
-EPS_END = 0.01
-EPS_DECAY = 4 * MEM_SIZE
-GAMMA = 0.99
-BATCH_SIZE = 32
-REPLAY_START_SIZE = 10000
 
-class Network(nn.Module):
-    def __init__(self, input_dims, n_actions):
-        super(Network, self).__init__()
-        self.fc1 = nn.Linear(*input_dims, FC1_DIMS)
-        self.fc2 = nn.Linear(FC1_DIMS, FC2_DIMS)
-        self.fc3 = nn.Linear(FC2_DIMS, n_actions)
+best_reward = 0
+average_reward = 0
+episode_history = []
+episode_reward_history = []
+np.bool = np.bool_
+
+# for creating the policy and target networks - same architecture
+class Network(torch.nn.Module):
+    def __init__(self, env):
+        super().__init__()
+        self.input_shape = env.observation_space.shape
+        self.action_space = env.action_space.n
+
+        # build an MLP with 2 hidden layers
+        self.layers = torch.nn.Sequential(
+            torch.nn.Linear(*self.input_shape, FC1_DIMS),   # input layer
+            torch.nn.ReLU(),     # this is called an activation function
+            torch.nn.Linear(FC1_DIMS, FC2_DIMS),    # hidden layer
+            torch.nn.ReLU(),     # this is called an activation function
+            torch.nn.Linear(FC2_DIMS, self.action_space)    # output layer
+            )
+
         self.optimizer = optim.Adam(self.parameters(), lr=LEARNING_RATE)
-        self.loss = nn.MSELoss()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.to(self.device)
+        self.loss = nn.MSELoss()  # loss function
 
-    def forward(self, state):
-        x = torch.relu(self.fc1(state))
-        x = torch.relu(self.fc2(x))
-        actions = self.fc3(x)
-        return actions
+    def forward(self, x):
+        return self.layers(x)
 
+# handles the storing and retrival of sampled experiences
 class ReplayBuffer:
-    def __init__(self, max_size, input_shape):
-        self.mem_size = max_size
-        self.mem_counter = 0
-        self.state_memory = np.zeros((self.mem_size, *input_shape), dtype=np.float32)
-        self.new_state_memory = np.zeros((self.mem_size, *input_shape), dtype=np.float32)
-        self.action_memory = np.zeros(self.mem_size, dtype=np.int64)
-        self.reward_memory = np.zeros(self.mem_size, dtype=np.float32)
-        self.terminal_memory = np.zeros(self.mem_size, dtype=np.bool_)
+    def __init__(self, env):
+        self.mem_count = 0
+        self.states = np.zeros((MEM_SIZE, *env.observation_space.shape),dtype=np.float32)
+        self.actions = np.zeros(MEM_SIZE, dtype=np.int64)
+        self.rewards = np.zeros(MEM_SIZE, dtype=np.float32)
+        self.states_ = np.zeros((MEM_SIZE, *env.observation_space.shape),dtype=np.float32)
+        self.dones = np.zeros(MEM_SIZE, dtype=np.bool)
 
-    def store_transition(self, state, action, reward, state_, done):
-        index = self.mem_counter % self.mem_size
-        self.state_memory[index] = state
-        self.new_state_memory[index] = state_
-        self.action_memory[index] = action
-        self.reward_memory[index] = reward
-        self.terminal_memory[index] = done
-        self.mem_counter += 1
+    def add(self, state, action, reward, state_, done):
+        # if memory count is higher than the max memory size then overwrite previous values
+        if self.mem_count < MEM_SIZE:
+            mem_index = self.mem_count
+        else:
+            mem_index = int(self.mem_count % ((1-MEM_RETAIN) * MEM_SIZE) + (MEM_RETAIN * MEM_SIZE))  # avoid catastrophic forgetting, retain first 10% of replay buffer
 
-    def sample_buffer(self, batch_size):
-        max_mem = min(self.mem_counter, self.mem_size)
-        batch = np.random.choice(max_mem, batch_size, replace=False)
+        self.states[mem_index]  = state
+        self.actions[mem_index] = action
+        self.rewards[mem_index] = reward
+        self.states_[mem_index] = state_
+        self.dones[mem_index] =  1 - done
 
-        states = self.state_memory[batch]
-        actions = self.action_memory[batch]
-        rewards = self.reward_memory[batch]
-        states_ = self.new_state_memory[batch]
-        dones = self.terminal_memory[batch]
+        self.mem_count += 1
+
+    # returns random samples from the replay buffer, number is equal to BATCH_SIZE
+    def sample(self):
+        MEM_MAX = min(self.mem_count, MEM_SIZE)
+        batch_indices = np.random.choice(MEM_MAX, BATCH_SIZE, replace=True)
+
+        states  = self.states[batch_indices]
+        actions = self.actions[batch_indices]
+        rewards = self.rewards[batch_indices]
+        states_ = self.states_[batch_indices]
+        dones   = self.dones[batch_indices]
 
         return states, actions, rewards, states_, dones
 
 class DQN_Solver:
-    def __init__(self, input_dims, n_actions):
-        self.learn_step_counter = 0  # Added to track the number of steps taken (for epsilon decay)
-        self.action_space = [i for i in range(n_actions)]
-        self.memory = ReplayBuffer(MEM_SIZE, input_shape=input_dims)
-        self.policy_network = Network(input_dims=input_dims, n_actions=n_actions)
-        self.target_network = Network(input_dims=input_dims, n_actions=n_actions)
-        self.target_network.load_state_dict(self.policy_network.state_dict())
-        self.epsilon = EPS_START
+    def __init__(self, env):
+        self.memory = ReplayBuffer(env)
+        self.policy_network = Network(env)  # Q
+        self.target_network = Network(env)  # \hat{Q}
+        self.target_network.load_state_dict(self.policy_network.state_dict())  # initially set weights of Q to \hat{Q}
+        self.learn_count = 0    # keep track of the number of iterations we have learnt for
 
+    # epsilon greedy
     def choose_action(self, observation):
-        if self.memory.mem_counter > REPLAY_START_SIZE:
-            self.epsilon = EPS_END + (EPS_START - EPS_END) * \
-                math.exp(-1. * self.learn_step_counter / EPS_DECAY)
+        # only start decaying epsilon once we actually start learning, i.e. once the replay memory has REPLAY_START_SIZE
+        if self.memory.mem_count > REPLAY_START_SIZE:
+            eps_threshold = EPS_END + (EPS_START - EPS_END) * \
+                math.exp(-1. * self.learn_count / EPS_DECAY)
         else:
-            self.epsilon = EPS_START
+            eps_threshold = 1.0
+        # if we rolled a value lower than epsilon sample a random action
+        if random.random() < eps_threshold:
+            return np.random.randint(0, self.policy_network.action_space)    # sample random action with set priors (if we flap too much we will die too much at the start and learning will take forever)
 
-        if np.random.random() > self.epsilon:
-            state = torch.tensor([observation], dtype=torch.float32).to(self.policy_network.device)
-            actions = self.policy_network(state)
-            action = torch.argmax(actions).item()
-        else:
-            action = np.random.choice(self.action_space)
+        # otherwise policy network, Q, chooses action with highest estimated Q-value so far
+        state = torch.tensor(observation).float().detach()
+        state = state.unsqueeze(0)
+        self.policy_network.eval()  # only need forward pass
+        with torch.no_grad():       # so we don't compute gradients - save memory and computation
+            q_values = self.policy_network(state)
+        return torch.argmax(q_values).item()
 
-        return action
 
+    # main training loop
     def learn(self):
-        if self.memory.mem_counter < BATCH_SIZE:
-            return
+        states, actions, rewards, states_, dones = self.memory.sample()  # retrieve random batch of samples from replay memory
+        states = torch.tensor(states , dtype=torch.float32)
+        actions = torch.tensor(actions, dtype=torch.long)
+        rewards = torch.tensor(rewards, dtype=torch.float32)
+        states_ = torch.tensor(states_, dtype=torch.float32)
+        dones = torch.tensor(dones, dtype=torch.bool)
+        batch_indices = np.arange(BATCH_SIZE, dtype=np.int64)
 
+        self.policy_network.train(True)
+        q_values = self.policy_network(states)                # get current q-value estimates (all actions) from policy network, Q
+        q_values = q_values[batch_indices, actions]           # q values for sampled actions only
+
+        self.target_network.eval()                            # only need forward pass
+        with torch.no_grad():                                 # so we don't compute gradients - save memory and computation
+            q_values_next = self.target_network(states_)      # target q-values for states_ for all actions (target network, \hat{Q})
+
+        q_values_next_max = torch.max(q_values_next, dim=1)[0]  # max q values for next state
+
+        q_target = rewards + GAMMA * q_values_next_max * dones  # our target q-value
+
+        loss = self.policy_network.loss(q_values, q_target)     # compute loss between estimated q-values (policy network, Q) and target (target network, \hat{Q})
+        #compute gradients and update policy network Q weights
         self.policy_network.optimizer.zero_grad()
-
-        states, actions, rewards, states_, dones = self.memory.sample_buffer(BATCH_SIZE)
-        states = torch.tensor(states).to(self.policy_network.device)
-        actions = torch.tensor(actions).to(self.policy_network.device)
-        rewards = torch.tensor(rewards).to(self.policy_network.device)
-        states_ = torch.tensor(states_).to(self.policy_network.device)
-        dones = torch.tensor(dones).to(self.policy_network.device)
-
-        indices = np.arange(BATCH_SIZE)
-        q_pred = self.policy_network(states)[indices, actions]
-        q_next = self.target_network(states_).max(dim=1)[0]
-        q_next[dones] = 0.0
-
-        q_target = rewards + GAMMA * q_next
-
-        loss = self.policy_network.loss(q_pred, q_target)
         loss.backward()
         self.policy_network.optimizer.step()
-        self.learn_step_counter += 1  # Increment the step counter after each learning step
+        self.learn_count += 1
+
+        # set target network \hat{Q}'s weights to policy network Q's weights every C steps
+        if  self.learn_count % NETWORK_UPDATE_ITERS == NETWORK_UPDATE_ITERS - 1:
+            print("updating target network")
+            self.update_target_network()
+
+    def update_target_network(self):
+        self.target_network.load_state_dict(self.policy_network.state_dict())
+
+    def returning_epsilon(self):
+        return self.exploration_rate
