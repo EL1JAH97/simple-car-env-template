@@ -5,7 +5,7 @@ import torch.optim as optim
 import numpy as np
 import random
 import matplotlib.pyplot as plt
-from simple_driving.envs.simple_driving_env import SimpleDrivingEnv  # Ensure you import your specific environment
+from simple_driving.envs.simple_driving_env import SimpleDrivingEnv  
 from model import Network, DQN_Solver
 
 EPISODES = 3500
