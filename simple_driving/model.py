@@ -106,7 +106,12 @@ class DQN_Solver:
             eps_threshold = 1.0
         # if we rolled a value lower than epsilon sample a random action
         if random.random() < eps_threshold:
-            return np.random.randint(0, self.policy_network.action_space)    # sample random action with set priors (if we flap too much we will die too much at the start and learning will take forever)
+            # Define custom probabilities for exploration
+            # Ensuring the action probabilities sum to 1
+            p = [0.0, 0.0, 0.0,  # less likely to reverse
+                0.1, 0.1, 0.1,     # moderate chance to stay still
+                0.2, 0.3, 0.2]     # more likely to move forward
+            action = np.random.choice(np.array(range(9)), p=p)
 
         # otherwise policy network, Q, chooses action with highest estimated Q-value so far
         state = torch.tensor(observation).float().detach()

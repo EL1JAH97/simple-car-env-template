@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from simple_driving.envs.simple_driving_env import SimpleDrivingEnv  # Ensure you import your specific environment
 from model import Network, DQN_Solver
 
-EPISODES = 2500
+EPISODES = 3500
 REPLAY_START_SIZE = 10000
 
 # Seed setup for reproducibility
@@ -42,7 +42,7 @@ for i in range(EPISODES):
         state = state_
         episode_reward += reward
         print(f"Current Episode {i}: Current Reward: {episode_reward}")
-        
+
         if done:
             break
 
