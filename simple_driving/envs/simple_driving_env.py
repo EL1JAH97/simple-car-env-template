@@ -24,8 +24,8 @@ class SimpleDrivingEnv(gym.Env):
                 low=np.array([-1, -.6], dtype=np.float32),
                 high=np.array([1, .6], dtype=np.float32))
         self.observation_space = gym.spaces.box.Box(
-            low=np.array([-40, -40], dtype=np.float32),
-            high=np.array([40, 40], dtype=np.float32))
+            low=np.array([-40, -40, -40, -40], dtype=np.float32),
+            high=np.array([40, 40, 40, 40], dtype=np.float32))
         self.np_random, _ = gym.utils.seeding.np_random()
 
         if renders:
@@ -127,10 +127,10 @@ class SimpleDrivingEnv(gym.Env):
         self.reached_goal = False
 
         # Add an obstacle
-        x_obstacle = (self.np_random.uniform(5, 9) if self.np_random.integers(2) else
-             self.np_random.uniform(-9, -5))
-        y_obstacle = (self.np_random.uniform(5, 9) if self.np_random.integers(2) else
-             self.np_random.uniform(-9, -5))
+        # Randomly position the obstacle between the origin and the goal
+        alpha = self.np_random.uniform(0.1, 0.9)
+        x_obstacle = alpha * x
+        y_obstacle = alpha * y
         self.obstacle = (x_obstacle, y_obstacle)
 
         # Visual element of the goal
